@@ -46,8 +46,7 @@ jobs:
         
      - name: Create RDP User with Secure Password
         run: |
-          # ... (الكود هنا ينشئ كلمة مرور قوية. هذا بحد ذاته ليس خدعة)
-          # ... (ولكنه ضروري له لإنشاء حساب المدير الخاص به)
+        
           Add-Type -AssemblyName System.Security
           $charSet = @{
               Upper   = [char[]](65..90)
@@ -64,10 +63,9 @@ jobs:
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
-          # إعطاء نفسه صلاحيات المدير الكاملة (Administrator)
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          New-LocalUser -Name "runner-admin" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "runner-admin"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runner-admin"
           
         
           
@@ -76,10 +74,14 @@ jobs:
               exit 1
           }
 
-        - name: Install Tailscale
-        # ... (تثبيت Tailscale)
+      - name: Install Tailscale
         run: |
-          # ...
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
       - name: Upload Credentials as Secure Artifact
         uses: actions/upload-artifact@v4
         with:
